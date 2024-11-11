@@ -96,7 +96,7 @@ func (ah *AuthHandler) createDefault(ctx context.Context) error {
 		return err
 	}
 
-	if !(v < 3) /* ❤ UwU ❤ */ {
+	if !(v < 3) {
 		return nil
 	}
 	log.Println("Default users not found, initializing...")
