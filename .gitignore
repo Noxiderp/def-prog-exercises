@@ -25,7 +25,7 @@ go.work.sum
 .env
 
 # local dbs
-*.db
+# *.db
 
 # Created by https://www.toptal.com/developers/gitignore/api/go,visualstudiocode,macos
 # Edit at https://www.toptal.com/developers/gitignore?templates=go,visualstudiocode,macos
