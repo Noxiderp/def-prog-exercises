@@ -2,13 +2,17 @@ package app
 
 import (
 	"context"
-	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"strconv"
 	"text/template"
+
+	"github.com/Noxiderp/def-prog-exercises/safeauth"
+	"github.com/Noxiderp/def-prog-exercises/safesql"
+	sql "github.com/Noxiderp/def-prog-exercises/safesql"
 
 	_ "embed"
 )
@@ -37,7 +41,12 @@ func scanNote(rows *sql.Rows) (nt note, err error) {
 }
 
 func (nh *notesHandler) initialize(ctx context.Context) error {
-	must(nh.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS notes(id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, content TEXT)`))
+	ctx, ok := safeauth.Check(ctx, "write")
+	if !ok {
+		return errors.New("cannot initialize: don't have write access")
+	}
+	must(nh.db.ExecContext(ctx, safesql.New(
+		`CREATE TABLE IF NOT EXISTS notes(id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, content TEXT)`)))
 	nts, err := nh.getNotes(ctx)
 	if err != nil {
 		return err
@@ -54,7 +63,7 @@ func (nh *notesHandler) initialize(ctx context.Context) error {
 
 func (nh *notesHandler) getNotes(ctx context.Context) ([]note, error) {
 	// Retrieve notes
-	rows, err := nh.db.QueryContext(ctx, `SELECT * FROM notes`)
+	rows, err := nh.db.QueryContext(ctx, safesql.New(`SELECT * FROM notes`))
 	if err != nil {
 		return nil, err
 	}
@@ -74,12 +83,28 @@ func (nh *notesHandler) getNotes(ctx context.Context) ([]note, error) {
 }
 
 func (nh *notesHandler) putNote(ctx context.Context, nt note) error {
-	_, err := nh.db.ExecContext(ctx, `INSERT INTO notes(title, content) VALUES('`+nt.Title+`', '`+nt.Content+`')`)
+	_, err := nh.db.ExecContext(ctx, safesql.New(`INSERT INTO notes(title, content) VALUES(?,?)`), nt.Title, nt.Content)
 	return err
 }
 
+func (nh *notesHandler) getNote(ctx context.Context, id int) (note, error) {
+	rows, err := nh.db.QueryContext(ctx, safesql.New(`SELECT * FROM notes WHERE id = ?`), id)
+	if err != nil {
+		return note{}, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return note{}, errors.New("not found")
+	}
+	nt, err := scanNote(rows)
+	if err != nil {
+		return nt, err
+	}
+	return nt, rows.Err()
+}
+
 func (nh *notesHandler) deleteNote(ctx context.Context, id int) error {
-	_, err := nh.db.ExecContext(ctx, `DELETE FROM notes WHERE id = `+strconv.Itoa(id))
+	_, err := nh.db.ExecContext(ctx, safesql.New(`DELETE FROM notes WHERE id = ?`), id)
 	return err
 }
 
@@ -94,17 +119,19 @@ func Notes(ctx context.Context, auth *AuthHandler) http.Handler {
 
 	// Home for the note page
 	n.HandleFunc("/notes/", func(w http.ResponseWriter, r *http.Request) {
-		if !nh.auth.hasPrivilege(r, "read") {
+		ctx, ok := safeauth.Check(r.Context(), "read")
+		if !ok {
 			http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
 			return
 		}
-		notes, err := nh.getNotes(r.Context())
+		r = r.WithContext(ctx)
+		notes, err := nh.getNotes(ctx)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			io.WriteString(w, err.Error())
 			return
 		}
-		u, err := auth.getUser(r)
+		u, err := auth.UserForRequest(r)
 		if err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			io.WriteString(w, err.Error())
@@ -127,7 +154,8 @@ func Notes(ctx context.Context, auth *AuthHandler) http.Handler {
 
 	// Add notes
 	n.HandleFunc("/notes/add", func(w http.ResponseWriter, r *http.Request) {
-		if !nh.auth.hasPrivilege(r, "write") {
+		ctx, ok := safeauth.Check(r.Context(), "write")
+		if !ok {
 			w.WriteHeader(http.StatusUnauthorized)
 			io.WriteString(w, `<html>
 				You are not authorized to add notes.
@@ -135,6 +163,7 @@ func Notes(ctx context.Context, auth *AuthHandler) http.Handler {
 			</html>`)
 			return
 		}
+		r = r.WithContext(ctx)
 		title := r.FormValue("title")
 		content := r.FormValue("content")
 		if title == "" || content == "" {
@@ -144,7 +173,7 @@ func Notes(ctx context.Context, auth *AuthHandler) http.Handler {
 			</html>`)
 			return
 		}
-		if err := nh.putNote(r.Context(), note{
+		if err := nh.putNote(ctx, note{
 			Title:   title,
 			Content: content,
 		}); err != nil {
@@ -157,13 +186,15 @@ func Notes(ctx context.Context, auth *AuthHandler) http.Handler {
 
 	// Delete notes
 	n.HandleFunc("/notes/delete", func(w http.ResponseWriter, r *http.Request) {
-		if !nh.auth.hasPrivilege(r, "delete") {
+		ctx, ok := safeauth.Check(r.Context(), "delete")
+		if !ok {
 			w.WriteHeader(http.StatusUnauthorized)
 			io.WriteString(w, `<html>
 				You are not authorized to delete notes.
 				<a href="/notes">Go back</a>
 			</html>`)
 		}
+		r = r.WithContext(ctx)
 		id, err := strconv.Atoi(r.FormValue("id"))
 		if err != nil {
 			fmt.Fprintf(w, `<html>
@@ -171,7 +202,7 @@ func Notes(ctx context.Context, auth *AuthHandler) http.Handler {
 	</html>`, r.FormValue("id"))
 			return
 		}
-		if err := nh.deleteNote(r.Context(), id); err != nil {
+		if err := nh.deleteNote(ctx, id); err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			io.WriteString(w, err.Error())
 			return
